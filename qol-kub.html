@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Qo'l Kub</title>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+html,body{height:100%;margin:0;background:#000;color:#fff;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+#ui{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;text-align:center;background:rgba(0,0,0,.78);z-index:5}
+#ui h1{margin:0;font-size:26px}
+#ui p{margin:0;max-width:320px;line-height:1.5;color:#cfd3d8;font-size:15px}
+button{background:#ff3fa4;color:#fff;border:0;border-radius:999px;padding:14px 32px;font-size:17px;font-weight:600}
+#hint{position:fixed;left:0;right:0;bottom:calc(14px + env(safe-area-inset-bottom,0px));text-align:center;font-size:13px;color:#e6e8eb;text-shadow:0 1px 4px #000;z-index:3;padding:0 16px}
+#sw{position:fixed;top:calc(10px + env(safe-area-inset-top,0px));right:10px;z-index:4;background:rgba(0,0,0,.45);color:#fff;padding:8px 14px;font-size:14px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="sw" style="display:none">🔄 Kamera</button>
+<div id="hint" style="display:none">Ikki qo'lni ko'rsating: kub qo'llar orasida paydo bo'ladi. Qo'llarni yaqinlashtiring/uzoqlashtiring, buring. Barmoqlarni chimchilang: rang almashadi.</div>
+<div id="ui">
+  <h1>✋ Qo'l bilan 3D kub</h1>
+  <p>Kamerangiz orqali qo'llaringiz kuzatiladi va ular orasida 3D kub paydo bo'ladi. Video telefoningizdan chiqmaydi.</p>
+  <button id="go">Boshlash</button>
+  <p id="msg"></p>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script>
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const video=document.createElement('video');video.playsInline=true;video.muted=true;
+const ui=document.getElementById('ui'),msg=document.getElementById('msg'),hint=document.getElementById('hint'),sw=document.getElementById('sw');
+let W=0,H=0,dpr=1,facing='user',stream=null,hands=null,last=[];
+function resize(){dpr=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight;cv.width=W*dpr;cv.height=H*dpr;ctx.setTransform(dpr,0,0,dpr,0,0)}
+addEventListener('resize',resize);resize();
+
+const colors=['#ff3fa4','#2effa0','#ffa62e','#3fb7ff','#c77dff','#ffffff'];
+let ci=0,pinchWas=false;
+const S={x:W/2,y:H/2,size:0,roll:0,ax:0.6,ay:0.4,vis:0};
+const V=[];for(const x of[-1,1])for(const y of[-1,1])for(const z of[-1,1])V.push([x,y,z]);
+const E=[];for(let i=0;i<8;i++)for(let j=i+1;j<8;j++){let d=0;for(let k=0;k<3;k++)if(V[i][k]!==V[j][k])d++;if(d===1)E.push([i,j])}
+
+function map(lm){
+  const vw=video.videoWidth||1,vh=video.videoHeight||1,s=Math.max(W/vw,H/vh);
+  const ox=(W-vw*s)/2,oy=(H-vh*s)/2;
+  const mir=facing==='user'?1:0;
+  return{x:ox+((mir?1-lm.x:lm.x))*vw*s,y:oy+lm.y*vh*s};
+}
+function drawVideo(){
+  const vw=video.videoWidth,vh=video.videoHeight;
+  ctx.fillStyle='#000';ctx.fillRect(0,0,W,H);
+  if(!vw)return;
+  const s=Math.max(W/vw,H/vh),dw=vw*s,dh=vh*s,ox=(W-dw)/2,oy=(H-dh)/2;
+  ctx.save();
+  if(facing==='user'){ctx.translate(W,0);ctx.scale(-1,1);}
+  ctx.drawImage(video,facing==='user'?W-ox-dw:ox,oy,dw,dh);
+  ctx.restore();
+  ctx.fillStyle='rgba(0,0,0,.25)';ctx.fillRect(0,0,W,H);
+}
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+function pinchOf(h){const t=map(h[4]),i=map(h[8]),w=map(h[0]),m=map(h[9]);return dist(t,i)<dist(w,m)*0.35}
+
+function update(){
+  const pts=last.map(h=>({palm:map(h[9]),tip:map(h[8]),thumb:map(h[4]),pinch:pinchOf(h)}));
+  let tx=S.x,ty=S.y,tsize=0,troll=S.roll;
+  if(pts.length>=2){
+    const a=pts[0].palm,b=pts[1].palm;
+    tx=(a.x+b.x)/2;ty=(a.y+b.y)/2-20;
+    tsize=Math.max(20,dist(a,b)*0.42);
+    let ang=Math.atan2(b.y-a.y,b.x-a.x);if(ang>Math.PI/2)ang-=Math.PI;if(ang<-Math.PI/2)ang+=Math.PI;
+    troll=ang;
+    S.ay+=0.02+Math.abs(a.y-b.y)/H*0.12;
+    S.ax+=0.012;
+  }else if(pts.length===1){
+    const p=pts[0];
+    tx=p.tip.x;ty=p.tip.y-40;
+    tsize=p.pinch?42:Math.max(24,dist(p.tip,p.thumb)*0.9);
+    S.ay=(p.palm.x/W)*Math.PI*3;S.ax=(p.palm.y/H)*Math.PI*3;
+    troll=0;
+  }
+  const any=pts.some(p=>p.pinch);
+  if(any&&!pinchWas){ci=(ci+1)%colors.length;if(navigator.vibrate)navigator.vibrate(15)}
+  pinchWas=any;
+  const k=0.25;
+  S.x+=(tx-S.x)*k;S.y+=(ty-S.y)*k;S.roll+=(troll-S.roll)*k;
+  S.size+=(tsize-S.size)*0.2;
+  S.vis+=((tsize>0?1:0)-S.vis)*0.15;
+}
+function drawCube(){
+  if(S.vis<0.03||S.size<2)return;
+  const sz=S.size,col=colors[ci];
+  const cx=Math.cos(S.ax),sx=Math.sin(S.ax),cy=Math.cos(S.ay),sy=Math.sin(S.ay),cz=Math.cos(S.roll),sz2=Math.sin(S.roll);
+  const P=V.map(([x,y,z])=>{
+    let y1=y*cx-z*sx,z1=y*sx+z*cx;
+    let x2=x*cy+z1*sy,z2=-x*sy+z1*cy;
+    let x3=x2*cz-y1*sz2,y3=x2*sz2+y1*cz;
+    const f=1/(1+z2*0.18);
+    return[S.x+x3*sz*0.62*f,S.y+y3*sz*0.62*f];
+  });
+  ctx.save();
+  ctx.globalAlpha=S.vis;ctx.strokeStyle=col;ctx.lineWidth=2.5;ctx.lineJoin='round';
+  ctx.shadowColor=col;ctx.shadowBlur=18;
+  ctx.beginPath();
+  for(const[i,j]of E){ctx.moveTo(P[i][0],P[i][1]);ctx.lineTo(P[j][0],P[j][1])}
+  ctx.stroke();
+  ctx.fillStyle=col;
+  for(const p of P){ctx.beginPath();ctx.arc(p[0],p[1],3,0,7);ctx.fill()}
+  ctx.restore();
+}
+function drawHands(){
+  ctx.save();ctx.fillStyle='rgba(255,255,255,.85)';
+  for(const h of last)for(const i of[4,8,12,16,20,0]){const p=map(h[i]);ctx.beginPath();ctx.arc(p.x,p.y,4,0,7);ctx.fill()}
+  ctx.restore();
+}
+let busy=false;
+async function loop(){
+  if(video.readyState>=2&&!busy&&hands){busy=true;try{await hands.send({image:video})}catch(e){}busy=false}
+  update();drawVideo();drawCube();drawHands();
+  requestAnimationFrame(loop);
+}
+async function startCam(){
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:1280},height:{ideal:720}},audio:false});
+  video.srcObject=stream;await video.play();
+}
+document.getElementById('go').onclick=async()=>{
+  msg.textContent='Kamera ochilmoqda...';
+  try{
+    if(typeof Hands==='undefined')throw new Error('Qo\'l kuzatish kutubxonasi yuklanmadi');
+    await startCam();
+    hands=new Hands({locateFile:f=>'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/'+f});
+    hands.setOptions({maxNumHands:2,modelComplexity:0,minDetectionConfidence:0.6,minTrackingConfidence:0.5});
+    hands.onResults(r=>{last=r.multiHandLandmarks||[]});
+    ui.style.display='none';hint.style.display='block';sw.style.display='block';
+    setTimeout(()=>hint.style.opacity='0.0',9000);
+    loop();
+  }catch(e){
+    msg.textContent='Xatolik: '+(e.message||e)+'. Kameraga ruxsat berilganini tekshiring.';
+  }
+};
+sw.onclick=async()=>{facing=facing==='user'?'environment':'user';try{await startCam()}catch(e){}};
+</script>
+</body>
+</html>
